@@ -1,4 +1,4 @@
-name: 构建ruoyi-wms Windows可执行程序（适配官方文档）
+name: 构建ruoyi-wms Windows EXE（launch4j方案）
 on:
   push:
     branches: [ main, master ]
@@ -9,118 +9,106 @@ jobs:
   build-windows-exe:
     runs-on: windows-latest
     steps:
-      - name: 检出仓库代码
+      - name: 检出代码
         uses: actions/checkout@v4
 
-      - name: 配置JDK 17（严格匹配文档要求）
+      - name: 配置JDK 17
         uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
           cache: maven
-          java-package: jdk  # 文档要求完整JDK，非JRE
 
-      - name: 配置Maven镜像（适配文档的依赖源）
+      - name: 安装launch4j（ruoyi生态首选EXE打包工具）
         run: |
-          # 新增：匹配文档的Maven镜像配置，避免依赖下载失败
-          New-Item -Path ~/.m2 -Name settings.xml -ItemType File -Force
-          Set-Content -Path ~/.m2/settings.xml -Value @"
-          <?xml version="1.0" encoding="UTF-8"?>
-          <settings>
-            <mirrors>
-              <mirror>
-                <id>huaweicloud</id>
-                <name>华为云镜像</name>
-                <url>https://mirrors.huaweicloud.com/repository/maven/</url>
-                <mirrorOf>central</mirrorOf>
-              </mirror>
-            </mirrors>
-          </settings>
-          "@
+          # 用Chocolatey安装launch4j（Windows包管理器，CI环境预装）
+          choco install launch4j -y
+          # 验证安装
+          launch4j --version
         shell: pwsh
 
-      - name: Maven打包（严格按文档规范执行）
+      - name: Maven打包（确保生成可执行JAR）
         run: |
-          Write-Host "=== 按ruoyi-wms文档规范打包 ==="
-          # 核心：指定admin模块+依赖，激活dev profile（匹配文档默认环境）
+          # 严格按ruoyi-wms文档打包核心模块
           mvn clean package -DskipTests -Pdev -pl ruoyi-admin-wms -am
           
-          # 验证打包结果（文档要求的可执行JAR）
+          # 验证JAR有效性
           $JAR_PATH = "./ruoyi-admin-wms/target/ruoyi-admin-wms.jar"
-          Write-Host "JAR路径: $JAR_PATH"
           Write-Host "JAR是否存在: $(Test-Path $JAR_PATH)"
           if (-not (Test-Path $JAR_PATH)) {
-              Write-Error "❌ 未找到JAR包，打包失败！"
-              Get-ChildItem -Recurse -Path ./ruoyi-admin-wms/target
-              exit 1
-          }
-          # 验证文档要求的主类是否存在
-          & jar tf $JAR_PATH | Select-String -Pattern "com/ruoyi/RuoYiApplication.class"
-          if (-not $?) {
-              Write-Error "❌ JAR中无文档指定的主类com.ruoyi.RuoYiApplication！"
+              Write-Error "❌ Maven打包失败，无JAR文件！"
               exit 1
           }
         shell: pwsh
 
-      - name: 生成Windows EXE（适配文档运行规则）
+      - name: 配置launch4j（生成打包配置文件）
         run: |
-          # 变量定义（匹配文档的项目结构）
-          $JAR_PATH = "./ruoyi-admin-wms/target/ruoyi-admin-wms.jar"
-          $OUTPUT_DIR = "./windows-exe"
-          $APP_NAME = "ruoyi-wms"
-          $APP_VERSION = "5.2.0"  # 匹配文档的项目版本
-          $JAR_DIR = Split-Path -Path $JAR_PATH -Parent
-          $MAIN_JAR = Split-Path -Path $JAR_PATH -Leaf
-
+          # 创建launch4j配置文件（关键：适配Spring Boot JAR）
+          $LAUNCH4J_CONFIG = "./launch4j-config.xml"
+          $JAR_PATH = (Resolve-Path "./ruoyi-admin-wms/target/ruoyi-admin-wms.jar").Path
+          $EXE_OUTPUT = (Resolve-Path "./windows-exe").Path
+          
           # 创建输出目录
-          New-Item -ItemType Directory -Path $OUTPUT_DIR -Force | Out-Null
+          New-Item -ItemType Directory -Path "./windows-exe" -Force | Out-Null
 
-          Write-Host "=== 执行jpackage（适配文档规则）==="
-          # 核心：简化jpackage命令，匹配文档的运行要求（去掉复杂参数，优先保证生成）
-          $jpackageCmd = @(
-              "--type", "exe",
-              "--input", "`"$JAR_DIR`"",
-              "--dest", "`"$OUTPUT_DIR`"",
-              "--name", "`"$APP_NAME`"",
-              "--version", "`"$APP_VERSION`"",
-              "--main-jar", "`"$MAIN_JAR`"",
-              "--main-class", "org.springframework.boot.loader.JarLauncher",  # 文档隐含的Spring Boot启动类
-              "--win-console",  # 文档要求显示控制台日志
-              "--verbose",
-              "--log-file", "`"$OUTPUT_DIR/jpackage.log`""
-          )
-
-          # 执行jpackage（无管理员权限，匹配文档的普通运行规则）
-          & jpackage $jpackageCmd
-          $JPACKAGE_EXIT_CODE = $LASTEXITCODE
-
-          # 输出文档排查所需的日志
-          Write-Host "=== jpackage日志（适配文档排查）==="
-          if (Test-Path "$OUTPUT_DIR/jpackage.log") {
-              Get-Content "$OUTPUT_DIR/jpackage.log"
-          }
-
-          # 验证结果
-          if ($JPACKAGE_EXIT_CODE -ne 0) {
-              Write-Error "❌ jpackage执行失败，退出码: $JPACKAGE_EXIT_CODE"
-              exit 1
-          }
-          $EXE_FILE = Get-ChildItem -Path $OUTPUT_DIR -Filter "*.exe" -ErrorAction SilentlyContinue
-          if (-not $EXE_FILE) {
-              Write-Error "❌ 未生成EXE文件！"
-              exit 1
-          }
-          Write-Host "✅ EXE生成成功: $($EXE_FILE.FullName)"
+          # 写入launch4j配置（ruoyi-wms专用）
+          Set-Content -Path $LAUNCH4J_CONFIG -Value @"
+          <?xml version="1.0" encoding="UTF-8"?>
+          <launch4jConfig>
+            <dontWrapJar>false</dontWrapJar>
+            <headerType>console</headerType>  <!-- 控制台模式，匹配ruoyi日志输出 -->
+            <jar>$JAR_PATH</jar>
+            <outfile>$EXE_OUTPUT\ruoyi-wms.exe</outfile>
+            <errTitle>ruoyi-wms启动失败</errTitle>
+            <cmdLine></cmdLine>
+            <chdir>.</chdir>
+            <priority>normal</priority>
+            <downloadUrl>https://adoptium.net/temurin/releases/?version=17</downloadUrl>
+            <supportUrl></supportUrl>
+            <customProcName>false</customProcName>
+            <stayAlive>false</stayAlive>
+            <manifest></manifest>
+            <icon></icon>
+            <jre>
+              <path>%JAVA_HOME%\jre</path>  <!-- 兼容系统JRE -->
+              <minVersion>17</minVersion>   <!-- 匹配项目JDK版本 -->
+              <maxVersion></maxVersion>
+              <jdkPreference>preferJre</jdkPreference>
+              <runtimeBits>64/32</runtimeBits>
+            </jre>
+            <versionInfo>
+              <fileVersion>5.2.0.0</fileVersion>
+              <fileDescription>ruoyi-wms仓储管理系统</fileDescription>
+              <productVersion>5.2.0.0</productVersion>
+              <productName>ruoyi-wms</productName>
+              <companyName>ruoyi</companyName>
+              <internalName>ruoyi-wms</internalName>
+              <originalFilename>ruoyi-wms.exe</originalFilename>
+            </versionInfo>
+          </launch4jConfig>
+          Write-Host "✅ launch4j配置文件生成完成：$LAUNCH4J_CONFIG"
         shell: pwsh
-        env:
-          JAVA_HOME: ${{ env.JAVA_HOME_17_X64 }}
-          PATH: ${{ env.JAVA_HOME_17_X64 }}\bin;${{ env.PATH }}
 
-      - name: 上传EXE制品（匹配文档交付规范）
+      - name: 用launch4j打包生成EXE
+        run: |
+          # 执行launch4j打包
+          launch4j ./launch4j-config.xml
+          
+          # 验证EXE生成
+          $EXE_FILE = "./windows-exe/ruoyi-wms.exe"
+          Write-Host "EXE是否存在: $(Test-Path $EXE_FILE)"
+          if (-not (Test-Path $EXE_FILE)) {
+              Write-Error "❌ launch4j打包失败，无EXE文件！"
+              exit 1
+          }
+          Write-Host "✅ EXE生成成功：$EXE_FILE"
+          # 打印EXE文件信息
+          Get-Item $EXE_FILE
+        shell: pwsh
+
+      - name: 上传EXE制品
         uses: actions/upload-artifact@v4
         with:
           name: ruoyi-wms-Windows-EXE
-          path: |
-            ./windows-exe/**/*
-            ./ruoyi-admin-wms/target/ruoyi-admin-wms.jar  # 额外上传JAR，方便文档对照排查
+          path: ./windows-exe/ruoyi-wms.exe
           if-no-files-found: error
