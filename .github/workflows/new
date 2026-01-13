@@ -1,0 +1,105 @@
+name: 构建Windows可执行程序01
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build-windows-exe:
+    runs-on: windows-latest
+    steps:
+      - name: 检出仓库代码
+        uses: actions/checkout@v4
+
+      - name: 配置JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Maven打包（跳过测试）
+        run: |
+          # 调试：打印当前目录结构（确认项目目录）
+          Write-Host "=== 当前目录结构 ==="
+          Get-ChildItem -Recurse -Name
+          
+          # 执行Maven打包，并打印日志
+          Write-Host "=== 开始Maven打包 ==="
+          mvn clean package -DskipTests
+          
+          # 调试：检查打包后的JAR是否存在
+          $JAR_PATH = "./ruoyi-admin-wms/target/ruoyi-admin-wms.jar"
+          Write-Host "=== 验证JAR包 ==="
+          Write-Host "JAR路径：$JAR_PATH"
+          Write-Host "JAR是否存在：$(Test-Path $JAR_PATH)"
+          if (-not (Test-Path $JAR_PATH)) {
+              Write-Error "Maven打包失败，未找到JAR包：$JAR_PATH"
+              exit 1
+          }
+        shell: pwsh
+
+      - name: 生成Windows可执行程序
+        run: |
+          # 定义变量（适配wms-ruoyi项目）
+          $JAR_PATH = "./ruoyi-admin-wms/target/ruoyi-admin-wms.jar"
+          $OUTPUT_DIR = Resolve-Path -Path "./windows-exe" -ErrorAction SilentlyContinue
+          if (-not $OUTPUT_DIR) { $OUTPUT_DIR = (New-Item -ItemType Directory -Path "./windows-exe" -Force).FullName }
+          $APP_NAME = "WmsRuoYi"
+          $APP_VERSION = "1.0.0"
+          $JAR_DIR = (Split-Path -Path $JAR_PATH -Parent)  # JAR所在目录
+          $MAIN_JAR = (Split-Path -Path $JAR_PATH -Leaf)   # JAR文件名
+
+          # 调试：打印关键变量
+          Write-Host "=== 关键变量信息 ==="
+          Write-Host "JAR_DIR（JAR所在目录）：$JAR_DIR"
+          Write-Host "MAIN_JAR（JAR文件名）：$MAIN_JAR"
+          Write-Host "OUTPUT_DIR（输出目录）：$OUTPUT_DIR"
+          Write-Host "JDK路径：$env:JAVA_HOME"
+          Write-Host "jpackage版本：$(& jpackage --version)"
+
+          # 调试：列出JAR目录下的文件（确认JAR存在）
+          Write-Host "=== JAR目录下的文件 ==="
+          Get-ChildItem -Path $JAR_DIR -Name
+
+          # 执行jpackage（加错误捕获）
+          Write-Host "=== 开始执行jpackage ==="
+          try {
+              & jpackage `
+                --type exe `
+                --input "$JAR_DIR" `
+                --dest "$OUTPUT_DIR" `
+                --name "$APP_NAME" `
+                --version "$APP_VERSION" `
+                --main-jar "$MAIN_JAR" `
+                --main-class org.springframework.boot.loader.JarLauncher `
+                --win-console `
+                --win-dir-chooser `
+                --win-shortcut `
+                --win-menu
+              
+              # 检查jpackage执行后的退出码
+              if ($LASTEXITCODE -ne 0) {
+                  throw "jpackage执行失败，退出码：$LASTEXITCODE"
+              }
+          } catch {
+              Write-Error "jpackage执行异常：$_"
+              exit 1
+          }
+
+          # 调试：列出输出目录下的文件（确认EXE是否生成）
+          Write-Host "=== 输出目录下的文件 ==="
+          Get-ChildItem -Path $OUTPUT_DIR -Recurse -Name
+        shell: pwsh
+        env:
+          JAVA_HOME: ${{ env.JAVA_HOME_17_X64 }}
+          PATH: ${{ env.JAVA_HOME_17_X64 }}\bin;${{ env.PATH }}
+
+      - name: 上传Windows可执行程序
+        uses: actions/upload-artifact@v4
+        with:
+          name: WmsRuoYi-Windows-EXE
+          path: |
+            ./windows-exe/**/*  # 递归匹配所有文件（适配Windows目录结构）
+          if-no-files-found: error  # 无文件时直接抛出错误，而非警告
