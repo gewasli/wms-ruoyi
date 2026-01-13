@@ -1,159 +1,74 @@
-name: Build Windows EXE for WMS-RuoYi
-
+name: Build Windows Executable
 on:
   push:
-    branches: [ lite, advance, master, v1 ]
-  workflow_dispatch:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
 
 jobs:
   build-windows-exe:
     runs-on: windows-latest
-    timeout-minutes: 60
     steps:
-      # 步骤1：检出代码
+      # 1. 拉取代码
       - name: Checkout Repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
 
-      # 步骤2：自动适配 JDK 版本
-      - name: Setup JDK (Auto Match Branch)
+      # 2. 配置JDK（匹配RuoYi的JDK8）
+      - name: Set Up JDK 8
         uses: actions/setup-java@v4
         with:
-          java-version: ${{ github.ref_name == 'v1' ? '8' : '17' }}
+          java-version: '8'
           distribution: 'temurin'
-          cache: 'maven'
+          cache: maven # 缓存Maven依赖，加速构建
 
-      # 步骤3：配置 Maven 阿里云镜像（增加超时/重试）
-      - name: Configure Maven Settings
+      # 3. 打包RuoYi为可执行JAR（核心步骤）
+      - name: Build JAR with Maven
         run: |
-          New-Item -Path $env:USERPROFILE\.m2 -ItemType Directory -Force
-          @"
-          <?xml version="1.0" encoding="UTF-8"?>
-          <settings xmlns="http://maven.apache.org/SETTINGS/1.2.0"
-                    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-                    xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.2.0 https://maven.apache.org/xsd/settings-1.2.0.xsd">
-            <mirrors>
-              <mirror>
-                <id>aliyunmaven</id>
-                <mirrorOf>central</mirrorOf>
-                <url>https://maven.aliyun.com/repository/public</url>
-              </mirror>
-              <mirror>
-                <id>central</id>
-                <url>https://repo1.maven.org/maven2</url>
-                <mirrorOf>central</mirrorOf>
-              </mirror>
-            </mirrors>
-            <profiles>
-              <profile>
-                <id>maven</id>
-                <activation>
-                  <activeByDefault>true</activeByDefault>
-                </activation>
-                <properties>
-                  <maven.wagon.http.connectionTimeout>30000</maven.wagon.http.connectionTimeout>
-                  <maven.wagon.http.retryHandler.count>3</maven.wagon.http.retryHandler.count>
-                </properties>
-              </profile>
-            </profiles>
-          </settings>
-          "@ | Out-File -FilePath $env:USERPROFILE\.m2\settings.xml -Encoding utf8
-        shell: pwsh
+          # 进入项目根目录，打包ruoyi-admin模块（RuoYi主程序）
+          cd ${{ github.workspace }}
+          mvn clean package -DskipTests -Pprod
+          # 验证JAR是否生成
+          Get-ChildItem ${{ github.workspace }}\ruoyi-admin\target\*.jar
 
-      # 步骤4：Maven 打包（增加详细日志）
-      - name: Build Jar with Maven
+      # 4. 安装launch4j（JAR转EXE工具）
+      - name: Install Launch4j
         run: |
-          # 增加 -X 可查看详细依赖日志，失败时便于排查
-          mvn clean package -DskipTests -X
-        shell: cmd
-
-      # 步骤5：校验 Jar 包是否生成
-      - name: Check Jar File Exists
-        run: |
-          $JAR_PATH = ".\ruoyi-admin-wms\target\*.jar"
-          $JAR_FILE = Get-ChildItem $JAR_PATH | Select-Object -First 1
-          if (-not $JAR_FILE) {
-              Write-Error "❌ 未找到 Jar 包，请检查 Maven 打包步骤！"
-              Write-Host "📂 target 目录内容："
-              Get-ChildItem .\ruoyi-admin-wms\target -ErrorAction SilentlyContinue
-              exit 1
-          } else {
-              Write-Host "✅ 找到 Jar 包：$($JAR_FILE.FullName)"
-              $env:JAR_NAME = $JAR_FILE.Name
-          }
-        shell: pwsh
-        env:
-          JAR_PATH: ".\ruoyi-admin-wms\target\*.jar"
-
-      # 步骤6：安装 Launch4j（国内镜像源）
-      - name: Install Launch4j (Stable Source)
-        run: |
-          $launch4jUrl = "https://ghproxy.com/https://sourceforge.net/projects/launch4j/files/launch4j-3.50/launch4j-3.50-win32.zip/download"
-          Invoke-WebRequest -Uri $launch4jUrl -OutFile launch4j.zip -TimeoutSec 60
-          if (-not (Test-Path "launch4j.zip")) {
-              Write-Error "❌ Launch4j 压缩包下载失败"
-              exit 1
-          }
+          # 下载launch4j Windows版本
+          Invoke-WebRequest -Uri "https://downloads.sourceforge.net/project/launch4j/launch4j-3/3.50/launch4j-3.50-win32.zip" -OutFile launch4j.zip
           Expand-Archive -Path launch4j.zip -DestinationPath C:\launch4j -Force
-          $env:PATH += ";C:\launch4j\launch4j-3.50-win32"
-          if (-not (Get-Command "launch4j.exe" -ErrorAction SilentlyContinue)) {
-              Write-Error "❌ Launch4j 安装失败"
-              exit 1
-          }
-          Write-Host "✅ Launch4j 安装成功"
-        shell: pwsh
+          # 加入系统PATH
+          echo "C:\launch4j\launch4j-3.50-win32" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
-      # 步骤7：用 Launch4j 打包 EXE（注释图标，避免报错）
-      - name: Package to EXE with Launch4j
+      # 5. 配置launch4j并生成EXE
+      - name: Build Windows EXE
         run: |
-          $JAR_NAME = $env:JAR_NAME
-          # 创建输出目录
-          New-Item -Path .\windows-exe -ItemType Directory -Force
-          # 生成 Launch4j 配置文件
-          @"
+          # 编写launch4j配置文件（适配RuoYi）
+          $config = @"
           <launch4jConfig>
             <dontWrapJar>false</dontWrapJar>
-            <headerType>console</headerType>
-            <jar>.\ruoyi-admin-wms\target\$JAR_NAME</jar>
-            <outfile>.\windows-exe\ruoyi-wms.exe</outfile>
-            <errTitle></errTitle>
-            <cmdLine></cmdLine>
-            <chdir>.</chdir>
-            <priority>normal</priority>
-            <downloadUrl>https://java.com/download</downloadUrl>
-            <supportUrl></supportUrl>
-            <customProcName>false</customProcName>
-            <stayAlive>false</stayAlive>
-            <manifest></manifest>
-            <!-- 注释图标行，后续有图标文件再恢复 -->
-            <!-- <icon>.\ruoyi-admin-wms\src\main\resources\static\favicon.ico</icon> -->
+            <headerType>console</headerType> <!-- RuoYi是控制台程序，GUI需改gui -->
+            <jar>${{ github.workspace }}\ruoyi-admin\target\ruoyi-admin.jar</jar>
+            <outfile>${{ github.workspace }}\target\ruoyi-wms.exe</outfile>
             <jre>
-              <path>$env:JAVA_HOME</path>
-              <minVersion>$(${{ github.ref_name == 'v1' ? '8' : '17' }})</minVersion>
-              <maxVersion></maxVersion>
+              <minVersion>1.8.0</minVersion>
+              <bundledJre64Bit>true</bundledJre64Bit>
               <jdkPreference>preferJre</jdkPreference>
-              <runtimeBits>64/32</runtimeBits>
             </jre>
+            <versionInfo>
+              <fileVersion>1.0.0.0</fileVersion>
+              <productName>RuoYi WMS</productName>
+              <originalFilename>ruoyi-wms.exe</originalFilename>
+            </versionInfo>
           </launch4jConfig>
-          "@ | Out-File -FilePath launch4j.xml -Encoding utf8 -Force
+          "@
+          # 写入配置文件
+          $config | Out-File -FilePath ${{ github.workspace }}\launch4j.xml -Encoding utf8
           # 执行打包
-          launch4j.exe launch4j.xml
-          # 校验 EXE 是否生成
-          if (-not (Test-Path ".\windows-exe\ruoyi-wms.exe")) {
-              Write-Error "❌ EXE 打包失败，未找到生成的 exe 文件"
-              exit 1
-          } else {
-              Write-Host "✅ EXE 打包成功：.\windows-exe\ruoyi-wms.exe"
-          }
-        shell: pwsh
-        env:
-          JAR_NAME: ${{ env.JAR_NAME }}
+          launch4j ${{ github.workspace }}\launch4j.xml
 
-      # 步骤8：上传 EXE 产物
-      - name: Upload Windows EXE
+      # 6. 上传EXE产物（便于下载测试）
+      - name: Upload EXE Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ruoyi-wms-windows-exe-${{ github.ref_name }}
-          path: .\windows-exe\*.exe
-          retention-days: 30
+          name: ruoyi-wms-windows-exe
+          path: ${{ github.workspace }}\target\ruoyi-wms.exe
