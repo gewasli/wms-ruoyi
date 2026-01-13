@@ -1,4 +1,4 @@
-name: 构建ruoyi-wms Windows EXE（launch4j方案）
+name: 构建ruoyi-wms Windows EXE（launch4j最终版）
 on:
   push:
     branches: [ main, master ]
@@ -19,17 +19,40 @@ jobs:
           distribution: 'temurin'
           cache: maven
 
-      - name: 安装launch4j（ruoyi生态首选EXE打包工具）
+      - name: 安装launch4j并配置环境变量（核心修复）
         run: |
-          # 用Chocolatey安装launch4j（Windows包管理器，CI环境预装）
-          choco install launch4j -y
-          # 验证安装
+          # 1. 安装launch4j
+          choco install launch4j -y --no-progress
+          
+          # 2. 查找launch4j的安装路径（Chocolatey默认路径）
+          $LAUNCH4J_DIR = "C:\ProgramData\chocolatey\lib\launch4j\tools\launch4j"
+          $LAUNCH4J_EXE = Join-Path -Path $LAUNCH4J_DIR -ChildPath "launch4j.exe"
+          
+          # 3. 验证launch4j是否安装成功
+          Write-Host "launch4j安装路径：$LAUNCH4J_EXE"
+          if (-not (Test-Path $LAUNCH4J_EXE)) {
+              Write-Error "❌ launch4j安装失败，未找到可执行文件！"
+              # 兜底：列出chocolatey安装目录，排查路径
+              Get-ChildItem -Recurse -Path "C:\ProgramData\chocolatey\lib\launch4j"
+              exit 1
+          }
+          
+          # 4. 将launch4j路径加入当前会话的PATH（即时生效）
+          $env:PATH += ";$LAUNCH4J_DIR"
+          Write-Host "当前PATH：$env:PATH"
+          
+          # 5. 验证launch4j命令是否可用
           launch4j --version
+          if ($LASTEXITCODE -eq 0) {
+              Write-Host "✅ launch4j安装并配置成功！"
+          } else {
+              Write-Error "❌ launch4j命令仍无法识别，使用完整路径调用！"
+              & $LAUNCH4J_EXE --version
+          }
         shell: pwsh
 
       - name: Maven打包（确保生成可执行JAR）
         run: |
-          # 严格按ruoyi-wms文档打包核心模块
           mvn clean package -DskipTests -Pdev -pl ruoyi-admin-wms -am
           
           # 验证JAR有效性
@@ -43,67 +66,59 @@ jobs:
 
       - name: 配置launch4j（生成打包配置文件）
         run: |
-          # 创建launch4j配置文件（关键：适配Spring Boot JAR）
-          $LAUNCH4J_CONFIG = "./launch4j-config.xml"
-          $JAR_PATH = (Resolve-Path "./ruoyi-admin-wms/target/ruoyi-admin-wms.jar").Path
-          $EXE_OUTPUT = (Resolve-Path "./windows-exe").Path
-          
           # 创建输出目录
           New-Item -ItemType Directory -Path "./windows-exe" -Force | Out-Null
+          
+          # 定义路径（使用绝对路径避免解析问题）
+          $JAR_ABS_PATH = (Resolve-Path "./ruoyi-admin-wms/target/ruoyi-admin-wms.jar").Path
+          $EXE_ABS_PATH = (Resolve-Path "./windows-exe").Path + "\ruoyi-wms.exe"
+          $LAUNCH4J_CONFIG = "./launch4j-config.xml"
 
-          # 写入launch4j配置（ruoyi-wms专用）
+          # 写入launch4j配置文件
           Set-Content -Path $LAUNCH4J_CONFIG -Value @"
           <?xml version="1.0" encoding="UTF-8"?>
           <launch4jConfig>
             <dontWrapJar>false</dontWrapJar>
-            <headerType>console</headerType>  <!-- 控制台模式，匹配ruoyi日志输出 -->
-            <jar>$JAR_PATH</jar>
-            <outfile>$EXE_OUTPUT\ruoyi-wms.exe</outfile>
+            <headerType>console</headerType>
+            <jar>$JAR_ABS_PATH</jar>
+            <outfile>$EXE_ABS_PATH</outfile>
             <errTitle>ruoyi-wms启动失败</errTitle>
-            <cmdLine></cmdLine>
             <chdir>.</chdir>
-            <priority>normal</priority>
-            <downloadUrl>https://adoptium.net/temurin/releases/?version=17</downloadUrl>
-            <supportUrl></supportUrl>
-            <customProcName>false</customProcName>
-            <stayAlive>false</stayAlive>
-            <manifest></manifest>
-            <icon></icon>
             <jre>
-              <path>%JAVA_HOME%\jre</path>  <!-- 兼容系统JRE -->
-              <minVersion>17</minVersion>   <!-- 匹配项目JDK版本 -->
-              <maxVersion></maxVersion>
+              <minVersion>17</minVersion>
               <jdkPreference>preferJre</jdkPreference>
               <runtimeBits>64/32</runtimeBits>
             </jre>
             <versionInfo>
               <fileVersion>5.2.0.0</fileVersion>
-              <fileDescription>ruoyi-wms仓储管理系统</fileDescription>
-              <productVersion>5.2.0.0</productVersion>
               <productName>ruoyi-wms</productName>
-              <companyName>ruoyi</companyName>
-              <internalName>ruoyi-wms</internalName>
               <originalFilename>ruoyi-wms.exe</originalFilename>
             </versionInfo>
           </launch4jConfig>
           Write-Host "✅ launch4j配置文件生成完成：$LAUNCH4J_CONFIG"
         shell: pwsh
 
-      - name: 用launch4j打包生成EXE
+      - name: 用launch4j打包生成EXE（兜底完整路径）
         run: |
-          # 执行launch4j打包
-          launch4j ./launch4j-config.xml
+          # 优先用PATH中的launch4j，失败则用完整路径
+          $LAUNCH4J_EXE = "launch4j"
+          if (-not (Get-Command $LAUNCH4J_EXE -ErrorAction SilentlyContinue)) {
+              $LAUNCH4J_EXE = "C:\ProgramData\chocolatey\lib\launch4j\tools\launch4j\launch4j.exe"
+          }
+          
+          # 执行打包
+          Write-Host "执行命令：$LAUNCH4J_EXE ./launch4j-config.xml"
+          & $LAUNCH4J_EXE ./launch4j-config.xml
           
           # 验证EXE生成
           $EXE_FILE = "./windows-exe/ruoyi-wms.exe"
-          Write-Host "EXE是否存在: $(Test-Path $EXE_FILE)"
-          if (-not (Test-Path $EXE_FILE)) {
+          if (Test-Path $EXE_FILE) {
+              Write-Host "✅ EXE生成成功！文件信息："
+              Get-Item $EXE_FILE
+          } else {
               Write-Error "❌ launch4j打包失败，无EXE文件！"
               exit 1
           }
-          Write-Host "✅ EXE生成成功：$EXE_FILE"
-          # 打印EXE文件信息
-          Get-Item $EXE_FILE
         shell: pwsh
 
       - name: 上传EXE制品
