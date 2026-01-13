@@ -1,0 +1,94 @@
+name: Build Windows EXE for WMS-RuoYi
+
+on:
+  push:
+    branches: [ lite, advance, master ]
+  workflow_dispatch:
+
+# ✅ jobs 是对象，无多余 -
+jobs:
+  build-windows-exe:
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Configure Maven Settings
+        run: |
+          New-Item -Path $env:USERPROFILE\.m2 -ItemType Directory -Force
+          @"
+          <?xml version="1.0" encoding="UTF-8"?>
+          <settings xmlns="http://maven.apache.org/SETTINGS/1.2.0"
+                    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                    xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.2.0 https://maven.apache.org/xsd/settings-1.2.0.xsd">
+            <mirrors>
+              <mirror>
+                <id>aliyunmaven</id>
+                <mirrorOf>central</mirrorOf>
+                <url>https://maven.aliyun.com/repository/public</url>
+              </mirror>
+            </mirrors>
+          </settings>
+          "@ | Out-File -FilePath $env:USERPROFILE\.m2\settings.xml -Encoding utf8
+
+      - name: Build Jar with Maven
+        run: mvn clean package -DskipTests
+        shell: cmd
+
+      # 使用 Launch4j 打包（避免 jpackage 的解析问题）
+      - name: Install Launch4j
+        run: |
+          Invoke-WebRequest -Uri "https://sourceforge.net/projects/launch4j/files/launch4j-3.50/launch4j-3.50-win32.zip/download" -OutFile launch4j.zip
+          Expand-Archive -Path launch4j.zip -DestinationPath C:\launch4j -Force
+          $env:PATH += ";C:\launch4j\launch4j-3.50-win32"
+        shell: pwsh
+
+      - name: Package to EXE with Launch4j
+        run: |
+          $JAR_NAME = (Get-ChildItem .\ruoyi-admin-wms\target\*.jar | Select-Object -First 1).Name
+          # ✅ 生成合法的 Launch4j XML（无重复节点）
+          @"
+          <launch4jConfig>
+            <dontWrapJar>false</dontWrapJar>
+            <headerType>console</headerType>
+            <jar>.\ruoyi-admin-wms\target\$JAR_NAME</jar>
+            <outfile>.\windows-exe\ruoyi-wms.exe</outfile>
+            <errTitle></errTitle>
+            <cmdLine></cmdLine>
+            <chdir>.</chdir>
+            <priority>normal</priority>
+            <downloadUrl>https://java.com/download</downloadUrl>
+            <supportUrl></supportUrl>
+            <customProcName>false</customProcName>
+            <stayAlive>false</stayAlive>
+            <manifest></manifest>
+            <icon>.\ruoyi-admin-wms\src\main\resources\static\favicon.ico</icon>
+            <jre>
+              <path>$env:JAVA_HOME</path>
+              <minVersion>17</minVersion>
+              <maxVersion></maxVersion>
+              <jdkPreference>preferJre</jdkPreference>
+              <runtimeBits>64/32</runtimeBits>
+            </jre>
+          </launch4jConfig>
+          "@ | Out-File -FilePath launch4j.xml -Encoding utf8
+          launch4j.exe launch4j.xml
+        shell: pwsh
+
+      - name: Upload Windows EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: ruoyi-wms-windows-exe
+          path: .\windows-exe\*.exe
+          retention-days: 30
