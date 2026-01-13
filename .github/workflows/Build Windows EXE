@@ -1,0 +1,84 @@
+name: Build Windows EXE for WMS-RuoYi
+
+on:
+  push:
+    branches: [ lite, advance, master ]
+  workflow_dispatch:
+
+jobs:
+  build-windows-exe:
+    runs-on: windows-latest # 必须用 Windows 环境构建 exe
+    timeout-minutes: 60
+
+    steps:
+      # 步骤1：检出代码
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # 步骤2：配置 JDK 17（项目主分支版本，v1 分支改为 8）
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      # 步骤3：配置 Maven 阿里云镜像（加速依赖下载）
+      - name: Configure Maven Settings
+        run: |
+          # Windows 下创建 Maven 配置目录
+          New-Item -Path $env:USERPROFILE\.m2 -ItemType Directory -Force
+          # 写入 settings.xml
+          @"
+          <?xml version="1.0" encoding="UTF-8"?>
+          <settings xmlns="http://maven.apache.org/SETTINGS/1.2.0"
+                    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                    xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.2.0 https://maven.apache.org/xsd/settings-1.2.0.xsd">
+            <mirrors>
+              <mirror>
+                <id>aliyunmaven</id>
+                <mirrorOf>central</mirrorOf>
+                <url>https://maven.aliyun.com/repository/public</url>
+              </mirror>
+            </mirrors>
+          </settings>
+          "@ | Out-File -FilePath $env:USERPROFILE\.m2\settings.xml -Encoding utf8
+
+      # 步骤4：Maven 打包 Jar 包
+      - name: Build Jar with Maven
+        run: mvn clean package -DskipTests
+        shell: cmd
+
+      # 步骤5：用 jpackage 打包成 Windows exe（整合 JRE）
+      - name: Package to Windows EXE
+        run: |
+          # 定义路径变量
+          $JAR_PATH = ".\ruoyi-admin-wms\target\*.jar"
+          $OUTPUT_DIR = ".\windows-exe"
+          $JRE_PATH = (Get-Item (Get-Command java).Source).Directory.Parent.FullName # 获取当前 JRE 路径
+          
+          # 创建输出目录
+          New-Item -Path $OUTPUT_DIR -ItemType Directory -Force
+          
+          # 执行 jpackage 打包
+          jpackage `
+            --type exe `
+            --name ruoyi-wms `
+            --input .\ruoyi-admin-wms\target `
+            --main-jar (Get-ChildItem $JAR_PATH | Select-Object -First 1).Name `
+            --dest $OUTPUT_DIR `
+            --runtime-image $JRE_PATH `
+            --win-console ` # 保留控制台窗口（便于查看日志）
+            --win-icon .\ruoyi-admin-wms\src\main\resources\static\favicon.ico ` # 可选：自定义exe图标
+            --app-version 1.0.0 `
+            --vendor "ruoyi-wms"
+
+      # 步骤6：上传 exe 产物
+      - name: Upload Windows EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: ruoyi-wms-windows-exe
+          path: .\windows-exe\*.exe
+          retention-days: 30
