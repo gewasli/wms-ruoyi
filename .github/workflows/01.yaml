@@ -2,28 +2,29 @@ name: Build Windows EXE for WMS-RuoYi
 
 on:
   push:
-    branches: [ lite, advance, master ]
+    branches: [ lite, advance, master, v1 ]
   workflow_dispatch:
 
-# ✅ jobs 是对象，无多余 -
 jobs:
   build-windows-exe:
     runs-on: windows-latest
     timeout-minutes: 60
-
     steps:
+      # 步骤1：检出代码
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      - name: Setup JDK 17
+      # 步骤2：自动适配 JDK 版本
+      - name: Setup JDK (Auto Match Branch)
         uses: actions/setup-java@v4
         with:
-          java-version: '17'
+          java-version: ${{ github.ref_name == 'v1' ? '8' : '17' }}
           distribution: 'temurin'
           cache: 'maven'
 
+      # 步骤3：配置 Maven 阿里云镜像（增加超时/重试）
       - name: Configure Maven Settings
         run: |
           New-Item -Path $env:USERPROFILE\.m2 -ItemType Directory -Force
@@ -38,26 +39,78 @@ jobs:
                 <mirrorOf>central</mirrorOf>
                 <url>https://maven.aliyun.com/repository/public</url>
               </mirror>
+              <mirror>
+                <id>central</id>
+                <url>https://repo1.maven.org/maven2</url>
+                <mirrorOf>central</mirrorOf>
+              </mirror>
             </mirrors>
+            <profiles>
+              <profile>
+                <id>maven</id>
+                <activation>
+                  <activeByDefault>true</activeByDefault>
+                </activation>
+                <properties>
+                  <maven.wagon.http.connectionTimeout>30000</maven.wagon.http.connectionTimeout>
+                  <maven.wagon.http.retryHandler.count>3</maven.wagon.http.retryHandler.count>
+                </properties>
+              </profile>
+            </profiles>
           </settings>
           "@ | Out-File -FilePath $env:USERPROFILE\.m2\settings.xml -Encoding utf8
-
-      - name: Build Jar with Maven
-        run: mvn clean package -DskipTests
-        shell: cmd
-
-      # 使用 Launch4j 打包（避免 jpackage 的解析问题）
-      - name: Install Launch4j
-        run: |
-          Invoke-WebRequest -Uri "https://sourceforge.net/projects/launch4j/files/launch4j-3.50/launch4j-3.50-win32.zip/download" -OutFile launch4j.zip
-          Expand-Archive -Path launch4j.zip -DestinationPath C:\launch4j -Force
-          $env:PATH += ";C:\launch4j\launch4j-3.50-win32"
         shell: pwsh
 
+      # 步骤4：Maven 打包（增加详细日志）
+      - name: Build Jar with Maven
+        run: |
+          # 增加 -X 可查看详细依赖日志，失败时便于排查
+          mvn clean package -DskipTests -X
+        shell: cmd
+
+      # 步骤5：校验 Jar 包是否生成
+      - name: Check Jar File Exists
+        run: |
+          $JAR_PATH = ".\ruoyi-admin-wms\target\*.jar"
+          $JAR_FILE = Get-ChildItem $JAR_PATH | Select-Object -First 1
+          if (-not $JAR_FILE) {
+              Write-Error "❌ 未找到 Jar 包，请检查 Maven 打包步骤！"
+              Write-Host "📂 target 目录内容："
+              Get-ChildItem .\ruoyi-admin-wms\target -ErrorAction SilentlyContinue
+              exit 1
+          } else {
+              Write-Host "✅ 找到 Jar 包：$($JAR_FILE.FullName)"
+              $env:JAR_NAME = $JAR_FILE.Name
+          }
+        shell: pwsh
+        env:
+          JAR_PATH: ".\ruoyi-admin-wms\target\*.jar"
+
+      # 步骤6：安装 Launch4j（国内镜像源）
+      - name: Install Launch4j (Stable Source)
+        run: |
+          $launch4jUrl = "https://ghproxy.com/https://sourceforge.net/projects/launch4j/files/launch4j-3.50/launch4j-3.50-win32.zip/download"
+          Invoke-WebRequest -Uri $launch4jUrl -OutFile launch4j.zip -TimeoutSec 60
+          if (-not (Test-Path "launch4j.zip")) {
+              Write-Error "❌ Launch4j 压缩包下载失败"
+              exit 1
+          }
+          Expand-Archive -Path launch4j.zip -DestinationPath C:\launch4j -Force
+          $env:PATH += ";C:\launch4j\launch4j-3.50-win32"
+          if (-not (Get-Command "launch4j.exe" -ErrorAction SilentlyContinue)) {
+              Write-Error "❌ Launch4j 安装失败"
+              exit 1
+          }
+          Write-Host "✅ Launch4j 安装成功"
+        shell: pwsh
+
+      # 步骤7：用 Launch4j 打包 EXE（注释图标，避免报错）
       - name: Package to EXE with Launch4j
         run: |
-          $JAR_NAME = (Get-ChildItem .\ruoyi-admin-wms\target\*.jar | Select-Object -First 1).Name
-          # ✅ 生成合法的 Launch4j XML（无重复节点）
+          $JAR_NAME = $env:JAR_NAME
+          # 创建输出目录
+          New-Item -Path .\windows-exe -ItemType Directory -Force
+          # 生成 Launch4j 配置文件
           @"
           <launch4jConfig>
             <dontWrapJar>false</dontWrapJar>
@@ -73,22 +126,34 @@ jobs:
             <customProcName>false</customProcName>
             <stayAlive>false</stayAlive>
             <manifest></manifest>
-            <icon>.\ruoyi-admin-wms\src\main\resources\static\favicon.ico</icon>
+            <!-- 注释图标行，后续有图标文件再恢复 -->
+            <!-- <icon>.\ruoyi-admin-wms\src\main\resources\static\favicon.ico</icon> -->
             <jre>
               <path>$env:JAVA_HOME</path>
-              <minVersion>17</minVersion>
+              <minVersion>$(${{ github.ref_name == 'v1' ? '8' : '17' }})</minVersion>
               <maxVersion></maxVersion>
               <jdkPreference>preferJre</jdkPreference>
               <runtimeBits>64/32</runtimeBits>
             </jre>
           </launch4jConfig>
-          "@ | Out-File -FilePath launch4j.xml -Encoding utf8
+          "@ | Out-File -FilePath launch4j.xml -Encoding utf8 -Force
+          # 执行打包
           launch4j.exe launch4j.xml
+          # 校验 EXE 是否生成
+          if (-not (Test-Path ".\windows-exe\ruoyi-wms.exe")) {
+              Write-Error "❌ EXE 打包失败，未找到生成的 exe 文件"
+              exit 1
+          } else {
+              Write-Host "✅ EXE 打包成功：.\windows-exe\ruoyi-wms.exe"
+          }
         shell: pwsh
+        env:
+          JAR_NAME: ${{ env.JAR_NAME }}
 
+      # 步骤8：上传 EXE 产物
       - name: Upload Windows EXE
         uses: actions/upload-artifact@v4
         with:
-          name: ruoyi-wms-windows-exe
+          name: ruoyi-wms-windows-exe-${{ github.ref_name }}
           path: .\windows-exe\*.exe
           retention-days: 30
