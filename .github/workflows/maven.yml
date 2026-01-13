@@ -1,4 +1,4 @@
-name: 构建Windows可执行程序
+name: 构建ruoyi-wms Windows可执行程序（适配官方文档）
 on:
   push:
     branches: [ main, master ]
@@ -12,69 +12,71 @@ jobs:
       - name: 检出仓库代码
         uses: actions/checkout@v4
 
-      - name: 配置JDK 17（强制使用完整JDK）
+      - name: 配置JDK 17（严格匹配文档要求）
         uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
           cache: maven
-          java-package: jdk  # 明确使用JDK（非JRE），jpackage依赖JDK
+          java-package: jdk  # 文档要求完整JDK，非JRE
 
-      - name: 打印基础环境信息（调试）
+      - name: 配置Maven镜像（适配文档的依赖源）
         run: |
-          Write-Host "=== 基础环境 ==="
-          Write-Host "Java版本: $(java -version 2>&1)"
-          Write-Host "Jpackage版本: $(jpackage --version 2>&1)"
-          Write-Host "当前工作目录: $(Get-Location)"
-          Write-Host "JAVA_HOME: $env:JAVA_HOME"
-          Write-Host "PATH: $env:PATH"
+          # 新增：匹配文档的Maven镜像配置，避免依赖下载失败
+          New-Item -Path ~/.m2 -Name settings.xml -ItemType File -Force
+          Set-Content -Path ~/.m2/settings.xml -Value @"
+          <?xml version="1.0" encoding="UTF-8"?>
+          <settings>
+            <mirrors>
+              <mirror>
+                <id>huaweicloud</id>
+                <name>华为云镜像</name>
+                <url>https://mirrors.huaweicloud.com/repository/maven/</url>
+                <mirrorOf>central</mirrorOf>
+              </mirror>
+            </mirrors>
+          </settings>
+          "@
         shell: pwsh
 
-      - name: Maven打包（强制repackage，生成可执行JAR）
+      - name: Maven打包（严格按文档规范执行）
         run: |
-          Write-Host "=== 开始Maven打包 ==="
-          # 强制指定profile为dev（匹配项目默认环境），确保配置加载
-          mvn clean package -DskipTests -Pdev
+          Write-Host "=== 按ruoyi-wms文档规范打包 ==="
+          # 核心：指定admin模块+依赖，激活dev profile（匹配文档默认环境）
+          mvn clean package -DskipTests -Pdev -pl ruoyi-admin-wms -am
           
-          # 关键：验证打包结果
+          # 验证打包结果（文档要求的可执行JAR）
           $JAR_PATH = "./ruoyi-admin-wms/target/ruoyi-admin-wms.jar"
-          Write-Host "=== 验证Maven打包结果 ==="
           Write-Host "JAR路径: $JAR_PATH"
           Write-Host "JAR是否存在: $(Test-Path $JAR_PATH)"
           if (-not (Test-Path $JAR_PATH)) {
-              Write-Error "❌ Maven打包失败，未找到JAR包！"
-              Get-ChildItem -Recurse -Path ./ruoyi-admin-wms/target  # 列出target目录所有文件
+              Write-Error "❌ 未找到JAR包，打包失败！"
+              Get-ChildItem -Recurse -Path ./ruoyi-admin-wms/target
               exit 1
           }
-          
-          # 验证JAR是否为可执行的Spring Boot JAR
-          Write-Host "JAR文件大小: $(Get-Item $JAR_PATH).Length 字节"
-          Write-Host "JAR清单文件内容: "
-          & jar xf $JAR_PATH META-INF/MANIFEST.MF
-          Get-Content META-INF/MANIFEST.MF | Select-String -Pattern "Main-Class|Spring-Boot"
+          # 验证文档要求的主类是否存在
+          & jar tf $JAR_PATH | Select-String -Pattern "com/ruoyi/RuoYiApplication.class"
+          if (-not $?) {
+              Write-Error "❌ JAR中无文档指定的主类com.ruoyi.RuoYiApplication！"
+              exit 1
+          }
         shell: pwsh
-        working-directory: .  # 确保在项目根目录执行
 
-      - name: 生成Windows EXE（强制校验+详细日志）
+      - name: 生成Windows EXE（适配文档运行规则）
         run: |
-          # 定义变量（使用绝对路径避免解析问题）
-          $PROJECT_ROOT = (Get-Location).Path
-          $JAR_PATH = Join-Path -Path $PROJECT_ROOT -ChildPath "ruoyi-admin-wms/target/ruoyi-admin-wms.jar"
-          $OUTPUT_DIR = Join-Path -Path $PROJECT_ROOT -ChildPath "windows-exe"
-          $APP_NAME = "WmsRuoYi"
-          $APP_VERSION = "1.0.0"
+          # 变量定义（匹配文档的项目结构）
+          $JAR_PATH = "./ruoyi-admin-wms/target/ruoyi-admin-wms.jar"
+          $OUTPUT_DIR = "./windows-exe"
+          $APP_NAME = "ruoyi-wms"
+          $APP_VERSION = "5.2.0"  # 匹配文档的项目版本
           $JAR_DIR = Split-Path -Path $JAR_PATH -Parent
           $MAIN_JAR = Split-Path -Path $JAR_PATH -Leaf
 
-          # 强制创建输出目录（并验证）
+          # 创建输出目录
           New-Item -ItemType Directory -Path $OUTPUT_DIR -Force | Out-Null
-          Write-Host "=== 生成EXE参数 ==="
-          Write-Host "JAR_DIR（绝对路径）: $JAR_DIR"
-          Write-Host "OUTPUT_DIR（绝对路径）: $OUTPUT_DIR"
-          Write-Host "MAIN_JAR: $MAIN_JAR"
 
-          # 执行jpackage（强制打印执行日志，捕获所有错误）
-          Write-Host "=== 执行jpackage命令 ==="
+          Write-Host "=== 执行jpackage（适配文档规则）==="
+          # 核心：简化jpackage命令，匹配文档的运行要求（去掉复杂参数，优先保证生成）
           $jpackageCmd = @(
               "--type", "exe",
               "--input", "`"$JAR_DIR`"",
@@ -82,32 +84,30 @@ jobs:
               "--name", "`"$APP_NAME`"",
               "--version", "`"$APP_VERSION`"",
               "--main-jar", "`"$MAIN_JAR`"",
-              "--main-class", "org.springframework.boot.loader.JarLauncher",
-              "--win-console",
-              "--win-dir-chooser",
-              "--win-shortcut",
-              "--win-menu",
-              "--verbose"  # 关键：开启jpackage详细日志，排查生成失败原因
+              "--main-class", "org.springframework.boot.loader.JarLauncher",  # 文档隐含的Spring Boot启动类
+              "--win-console",  # 文档要求显示控制台日志
+              "--verbose",
+              "--log-file", "`"$OUTPUT_DIR/jpackage.log`""
           )
-          Write-Host "执行命令: jpackage $($jpackageCmd -join ' ')"
-          
-          # 执行并捕获所有输出
-          & jpackage $jpackageCmd 2>&1 | Tee-Object -FilePath "$OUTPUT_DIR/jpackage-log.txt"
-          
-          # 校验jpackage执行结果
-          if ($LASTEXITCODE -ne 0) {
-              Write-Error "❌ jpackage执行失败，退出码: $LASTEXITCODE"
-              Get-Content "$OUTPUT_DIR/jpackage-log.txt"  # 打印jpackage日志
-              exit 1
+
+          # 执行jpackage（无管理员权限，匹配文档的普通运行规则）
+          & jpackage $jpackageCmd
+          $JPACKAGE_EXIT_CODE = $LASTEXITCODE
+
+          # 输出文档排查所需的日志
+          Write-Host "=== jpackage日志（适配文档排查）==="
+          if (Test-Path "$OUTPUT_DIR/jpackage.log") {
+              Get-Content "$OUTPUT_DIR/jpackage.log"
           }
 
-          # 验证EXE生成结果
-          Write-Host "=== 验证EXE生成结果 ==="
-          Get-ChildItem -Recurse -Path $OUTPUT_DIR
+          # 验证结果
+          if ($JPACKAGE_EXIT_CODE -ne 0) {
+              Write-Error "❌ jpackage执行失败，退出码: $JPACKAGE_EXIT_CODE"
+              exit 1
+          }
           $EXE_FILE = Get-ChildItem -Path $OUTPUT_DIR -Filter "*.exe" -ErrorAction SilentlyContinue
           if (-not $EXE_FILE) {
-              Write-Error "❌ 未生成EXE文件！jpackage日志内容: "
-              Get-Content "$OUTPUT_DIR/jpackage-log.txt"
+              Write-Error "❌ 未生成EXE文件！"
               exit 1
           }
           Write-Host "✅ EXE生成成功: $($EXE_FILE.FullName)"
@@ -116,10 +116,11 @@ jobs:
           JAVA_HOME: ${{ env.JAVA_HOME_17_X64 }}
           PATH: ${{ env.JAVA_HOME_17_X64 }}\bin;${{ env.PATH }}
 
-      - name: 上传制品（含jpackage日志）
+      - name: 上传EXE制品（匹配文档交付规范）
         uses: actions/upload-artifact@v4
         with:
-          name: WmsRuoYi-Windows-EXE
+          name: ruoyi-wms-Windows-EXE
           path: |
-            ./windows-exe/**/*  # 递归匹配所有文件（包括日志）
-          if-no-files-found: error  # 无文件直接报错，不再警告
+            ./windows-exe/**/*
+            ./ruoyi-admin-wms/target/ruoyi-admin-wms.jar  # 额外上传JAR，方便文档对照排查
+          if-no-files-found: error
